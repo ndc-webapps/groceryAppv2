@@ -509,13 +509,6 @@ const updateFreq = (name) => {
   f[key] = { name: name.trim(), count: (f[key]?.count || 0) + 1 };
   save(SK.freq, f);
 };
-const getSuggestions = (text) => {
-  const f = load(SK.freq, {});
-  const list = Object.values(f);
-  if (!text) return list.sort((a, b) => b.count - a.count).slice(0, 5).map(e => e.name);
-  return list.filter(e => e.name.toLowerCase().includes(text.toLowerCase()))
-    .sort((a, b) => b.count - a.count).slice(0, 5).map(e => e.name);
-};
 
 /* ───────────── Helpers ───────────── */
 const money = (n) => '$' + (Number(n) || 0).toFixed(2);
@@ -604,13 +597,13 @@ const ItemCard = ({ item, onEdit, onDelete }) => {
 };
 
 /* ───────────── Add / Edit modal ───────────── */
-const ItemModal = ({ isOpen, onClose, onSave, initialItem }) => {
+const ItemModal = ({ isOpen, onClose, onSave, initialItem, suggestIndex = {} }) => {
   const [name, setName] = useState('');
   const [qty, setQty] = useState('1');
   const [price, setPrice] = useState('');
   const [img, setImg] = useState('');
-  const [sugs, setSugs] = useState([]);
   const [errs, setErrs] = useState({});
+  const priceTouched = useRef(false);
   const fileRef = useRef();
   const nameRef = useRef();
 
@@ -621,11 +614,27 @@ const ItemModal = ({ isOpen, onClose, onSave, initialItem }) => {
       setPrice(initialItem ? String(initialItem.price) : '');
       setImg(initialItem?.imageBase64 || '');
       setErrs({});
+      priceTouched.current = !!initialItem;
       setTimeout(() => nameRef.current?.focus(), 120);
     }
   }, [isOpen, initialItem]);
 
-  useEffect(() => { if (isOpen) setSugs(getSuggestions(name)); }, [name, isOpen]);
+  // Smart price memory — exact match on what you typed
+  const intel = suggestIndex[name.trim().toLowerCase()] || null;
+
+  const sugs = useMemo(() => {
+    const f = name.trim().toLowerCase();
+    if (intel && f) return []; // exact match → show the intel card instead of chips
+    const all = Object.values(suggestIndex);
+    const arr = f ? all.filter(i => i.name.toLowerCase().includes(f)) : all;
+    return arr.sort((a, b) => b.count - a.count).slice(0, 5);
+  }, [name, suggestIndex, intel]);
+
+  // Auto-fill the last paid price when a known item is recognised (unless user typed their own)
+  useEffect(() => {
+    if (!isOpen || priceTouched.current) return;
+    if (intel && intel.lastPrice != null) setPrice(String(intel.lastPrice));
+  }, [intel, isOpen]);
 
   const handleImg = e => {
     const f = e.target.files[0];
@@ -662,11 +671,35 @@ const ItemModal = ({ isOpen, onClose, onSave, initialItem }) => {
             <label className="label">Item name</label>
             <input ref={nameRef} className={'field' + (errs.name ? ' invalid' : '')} type="text" value={name} onChange={e => { setName(e.target.value); setErrs(p => ({ ...p, name: null })); }} placeholder="e.g. Fresh Avocado" enterKeyHint="next" />
             {errs.name && <div className="err-text">{errs.name}</div>}
-            {sugs.length > 0 && (
+            {!intel && sugs.length > 0 && (
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 7, marginTop: 9 }}>
-                {sugs.map(s => <button key={s} className="sug-chip" onClick={() => { haptic(); setName(s); }}>{s}</button>)}
+                {sugs.map(s => (
+                  <button key={s.name} className="sug-chip" onClick={() => { haptic(); setName(s.name); if (!priceTouched.current && s.lastPrice != null) setPrice(String(s.lastPrice)); }}>
+                    {s.name}{s.lastPrice != null && <span style={{ opacity: .55, marginLeft: 5, fontWeight: 700 }}>{money(s.lastPrice)}</span>}
+                  </button>
+                ))}
               </div>
             )}
+            {intel && (() => {
+              const pNow = parseFloat(price);
+              const diff = pNow > 0 ? pNow - intel.lastPrice : 0;
+              return (
+                <div style={{ marginTop: 10, background: 'var(--surface-2)', border: '1px solid var(--border)', borderRadius: 'var(--r-md)', padding: '11px 13px', fontSize: 12.5 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', color: 'var(--text-2)', fontWeight: 600 }}>
+                    <span>📊 Bought {intel.count}×</span>
+                    <span>Last paid {money(intel.lastPrice)}{intel.lastStore ? ` · ${intel.lastStore}` : ''}</span>
+                  </div>
+                  {intel.min != null && intel.min < intel.lastPrice && (
+                    <div style={{ marginTop: 5, color: 'var(--success-text)', fontWeight: 600 }}>💚 Cheapest you found: {money(intel.min)}{intel.minStore ? ` at ${intel.minStore}` : ''}</div>
+                  )}
+                  {Math.abs(diff) > 0.009 && (
+                    <div style={{ marginTop: 5, fontWeight: 700, color: diff > 0 ? 'var(--danger-text)' : 'var(--success-text)' }}>
+                      {diff > 0 ? `↑ ${money(diff)} more than last time` : `↓ ${money(-diff)} cheaper than last time`}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
           </div>
 
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
@@ -677,7 +710,7 @@ const ItemModal = ({ isOpen, onClose, onSave, initialItem }) => {
             </div>
             <div>
               <label className="label">Price ($)</label>
-              <input className={'field' + (errs.price ? ' invalid' : '')} type="number" inputMode="decimal" step="0.01" min="0.01" value={price} onChange={e => { setPrice(e.target.value); setErrs(p => ({ ...p, price: null })); }} placeholder="0.00" enterKeyHint="done" onKeyDown={e => e.key === 'Enter' && handleSave()} />
+              <input className={'field' + (errs.price ? ' invalid' : '')} type="number" inputMode="decimal" step="0.01" min="0.01" value={price} onChange={e => { priceTouched.current = true; setPrice(e.target.value); setErrs(p => ({ ...p, price: null })); }} placeholder="0.00" enterKeyHint="done" onKeyDown={e => e.key === 'Enter' && handleSave()} />
               {errs.price && <div className="err-text">{errs.price}</div>}
             </div>
           </div>
@@ -813,6 +846,49 @@ const App = () => {
   useEffect(() => { save(SK.dark, dark); document.documentElement.classList.toggle('dark', dark); }, [dark]);
 
   const recentStores = useMemo(() => load(SK.stores, []), [sessionOn, sessions]);
+
+  // Smart memory: learn every item's price history from saved trips (cheapest store, last price, frequency)
+  const itemIntel = useMemo(() => {
+    const map = {};
+    [...sessions].sort((a, b) => new Date(a.dateTime) - new Date(b.dateTime)).forEach(s => {
+      s.items.forEach(it => {
+        const k = it.name.trim().toLowerCase();
+        if (!map[k]) map[k] = { display: it.name.trim(), count: 0, prices: [], lastPrice: 0, lastStore: '', lastQty: 1, min: Infinity, minStore: '' };
+        const m = map[k];
+        m.count += 1; m.prices.push(it.price);
+        m.lastPrice = it.price; m.lastStore = s.storeName; m.lastQty = it.quantity;
+        if (it.price < m.min) { m.min = it.price; m.minStore = s.storeName; }
+      });
+    });
+    Object.values(map).forEach(m => { m.avg = m.prices.reduce((a, b) => a + b, 0) / m.prices.length; if (m.min === Infinity) m.min = null; });
+    return map;
+  }, [sessions]);
+
+  // Merge price history with typed-name history → autocomplete index for the modal
+  const suggestIndex = useMemo(() => {
+    const idx = {};
+    Object.values(load(SK.freq, {})).forEach(f => { idx[f.name.toLowerCase()] = { name: f.name, count: f.count, lastPrice: null }; });
+    Object.values(itemIntel).forEach(m => {
+      const k = m.display.toLowerCase();
+      idx[k] = { name: m.display, count: Math.max(m.count, idx[k]?.count || 0), lastPrice: m.lastPrice, lastStore: m.lastStore, min: m.min, minStore: m.minStore };
+    });
+    return idx;
+  }, [itemIntel]);
+
+  const topItems = useMemo(() => Object.values(itemIntel).sort((a, b) => b.count - a.count).slice(0, 12), [itemIntel]);
+
+  // One-tap add a known item at its last price; merges quantity if already in the cart
+  const quickAdd = (it) => {
+    haptic();
+    setItems(prev => {
+      const k = it.display.toLowerCase();
+      const i = prev.findIndex(x => x.name.toLowerCase() === k);
+      if (i >= 0) { const c = [...prev]; c[i] = { ...c[i], quantity: c[i].quantity + 1 }; return c; }
+      return [...prev, { id: generateId(), name: it.display, quantity: 1, price: it.lastPrice, imageBase64: null }];
+    });
+    updateFreq(it.display);
+    showToast(`Added ${it.display}`);
+  };
 
   const startSession = () => {
     const name = storeInput.trim();
@@ -958,6 +1034,27 @@ const App = () => {
             </div>
           )}
         </div>
+
+        {(() => {
+          const inCart = new Set(items.map(i => i.name.toLowerCase()));
+          const chips = topItems.filter(t => !inCart.has(t.display.toLowerCase())).slice(0, 8);
+          if (!chips.length) return null;
+          return (
+            <div className="fade-up" style={{ padding: '14px 0 2px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '0 18px 8px' }}>
+                <span style={{ fontSize: 13 }}>⚡</span>
+                <span className="label" style={{ margin: 0 }}>Quick add</span>
+              </div>
+              <div style={{ display: 'flex', gap: 8, overflowX: 'auto', padding: '0 16px 4px' }} className="hide-scroll">
+                {chips.map(t => (
+                  <button key={t.display} className="chip" onClick={() => quickAdd(t)} style={{ flexShrink: 0 }}>
+                    + {t.display} <span style={{ opacity: .55, fontWeight: 700 }}>{money(t.lastPrice)}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          );
+        })()}
 
         <div style={{ padding: '16px 16px 0', paddingBottom: 'calc(200px + env(safe-area-inset-bottom))' }}>
           {items.length === 0 ? (
@@ -1261,7 +1358,7 @@ const App = () => {
         ))}
       </nav>
 
-      <ItemModal isOpen={modalOpen} onClose={() => { setModalOpen(false); setEditIdx(null); }} onSave={addOrUpdate} initialItem={editIdx !== null ? items[editIdx] : null} />
+      <ItemModal isOpen={modalOpen} onClose={() => { setModalOpen(false); setEditIdx(null); }} onSave={addOrUpdate} initialItem={editIdx !== null ? items[editIdx] : null} suggestIndex={suggestIndex} />
       <ReceiptModal session={receipt} onClose={() => setReceipt(null)} />
       {confirm && <ConfirmDialog {...confirm} onCancel={() => { const fn = confirm.onCancel; setConfirm(null); fn && fn(); }} />}
       <Toast data={toast} onUndo={runUndo} />
@@ -1270,6 +1367,16 @@ const App = () => {
 };
 
 ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+
+/* PWA manifest — makes the app installable to the home screen */
+if (!window._manifest) {
+  window._manifest = true;
+  const icon = 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512"><rect width="512" height="512" rx="112" fill="#16a34a"/><text x="50%" y="52%" font-size="300" text-anchor="middle" dominant-baseline="central">🛡️</text></svg>');
+  const manifest = { name: 'GroceryGuard', short_name: 'GroceryGuard', description: 'Smart grocery budget tracker & price log', display: 'standalone', orientation: 'portrait', background_color: '#0b1018', theme_color: '#16a34a', start_url: '.', icons: [{ src: icon, sizes: '192x192', type: 'image/svg+xml', purpose: 'any' }, { src: icon, sizes: '512x512', type: 'image/svg+xml', purpose: 'maskable' }] };
+  const mBlob = new Blob([JSON.stringify(manifest)], { type: 'application/manifest+json' });
+  const l = document.createElement('link'); l.rel = 'manifest'; l.href = URL.createObjectURL(mBlob); document.head.appendChild(l);
+  const al = document.createElement('link'); al.rel = 'apple-touch-icon'; al.href = icon; document.head.appendChild(al);
+}
 
 /* Service worker — offline shell */
 if ('serviceWorker' in navigator && !window._swReg) {
