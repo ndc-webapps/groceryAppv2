@@ -514,6 +514,25 @@ const updateFreq = (name) => {
 const money = (n) => '$' + (Number(n) || 0).toFixed(2);
 const haptic = (ms = 8) => { try { navigator.vibrate && navigator.vibrate(ms); } catch {} };
 
+// Load an external script once, on demand
+const loadScript = (src) => new Promise((res, rej) => {
+  if (document.querySelector(`script[data-dyn="${src}"]`)) return res();
+  const s = document.createElement('script');
+  s.src = src; s.dataset.dyn = src;
+  s.onload = () => res(); s.onerror = () => rej(new Error('load failed'));
+  document.head.appendChild(s);
+});
+
+// Pull the most likely price out of OCR text (prefers a decimal like 3.99, else a whole number)
+const parsePrice = (text) => {
+  const cleaned = (text || '').replace(/[^0-9.,\s]/g, ' ');
+  const dec = cleaned.match(/\d{1,4}[.,]\d{2}/g) || [];
+  const vals = dec.map(m => parseFloat(m.replace(',', '.'))).filter(v => v > 0 && v < 100000);
+  if (vals.length) return Math.max(...vals);
+  const ints = (cleaned.match(/\d{1,4}/g) || []).map(Number).filter(n => n > 0 && n < 100000);
+  return ints.length ? Math.max(...ints) : null;
+};
+
 /* ───────────── Toast ───────────── */
 const Toast = ({ data, onUndo, onDone }) => {
   if (!data) return null;
@@ -603,8 +622,10 @@ const ItemModal = ({ isOpen, onClose, onSave, initialItem, suggestIndex = {} }) 
   const [price, setPrice] = useState('');
   const [img, setImg] = useState('');
   const [errs, setErrs] = useState({});
+  const [scan, setScan] = useState(null); // { type:'load'|'ok'|'err', text }
   const priceTouched = useRef(false);
   const fileRef = useRef();
+  const scanRef = useRef();
   const nameRef = useRef();
 
   useEffect(() => {
@@ -614,10 +635,34 @@ const ItemModal = ({ isOpen, onClose, onSave, initialItem, suggestIndex = {} }) 
       setPrice(initialItem ? String(initialItem.price) : '');
       setImg(initialItem?.imageBase64 || '');
       setErrs({});
+      setScan(null);
       priceTouched.current = !!initialItem;
       setTimeout(() => nameRef.current?.focus(), 120);
     }
   }, [isOpen, initialItem]);
+
+  // Camera price scanner (OCR via Tesseract.js, lazy-loaded on first use)
+  const handleScan = async (e) => {
+    const f = e.target.files[0]; e.target.value = '';
+    if (!f) return;
+    haptic();
+    setScan({ type: 'load', text: 'Reading price…' });
+    try {
+      const dataUrl = await new Promise(res => { const r = new FileReader(); r.onloadend = () => res(r.result); r.readAsDataURL(f); });
+      await loadScript('https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js');
+      const worker = await Tesseract.createWorker('eng');
+      await worker.setParameters({ tessedit_char_whitelist: '0123456789.,$ ' });
+      const { data } = await worker.recognize(dataUrl);
+      await worker.terminate();
+      const p = parsePrice(data.text);
+      if (p != null) {
+        priceTouched.current = true; setPrice(String(p)); haptic(12);
+        setScan({ type: 'ok', text: `Found ${money(p)} — double-check it` });
+      } else { haptic(20); setScan({ type: 'err', text: "Couldn't read a price. Try a clearer, closer shot." }); }
+    } catch (err) {
+      setScan({ type: 'err', text: 'Scanner needs internet the first time. Try again.' });
+    }
+  };
 
   // Smart price memory — exact match on what you typed
   const intel = suggestIndex[name.trim().toLowerCase()] || null;
@@ -713,6 +758,21 @@ const ItemModal = ({ isOpen, onClose, onSave, initialItem, suggestIndex = {} }) 
               <input className={'field' + (errs.price ? ' invalid' : '')} type="number" inputMode="decimal" step="0.01" min="0.01" value={price} onChange={e => { priceTouched.current = true; setPrice(e.target.value); setErrs(p => ({ ...p, price: null })); }} placeholder="0.00" enterKeyHint="done" onKeyDown={e => e.key === 'Enter' && handleSave()} />
               {errs.price && <div className="err-text">{errs.price}</div>}
             </div>
+          </div>
+
+          {/* Camera price scanner */}
+          <div>
+            <input type="file" accept="image/*" capture="environment" ref={scanRef} onChange={handleScan} style={{ display: 'none' }} />
+            <button className="btn-ghost" style={{ width: '100%', minHeight: 46, borderStyle: 'dashed', border: '1.5px dashed var(--border-strong)', background: 'var(--surface-2)' }} onClick={() => scanRef.current.click()} disabled={scan?.type === 'load'}>
+              {scan?.type === 'load'
+                ? <><span style={{ width: 16, height: 16, borderRadius: '50%', border: '2px solid var(--border)', borderTopColor: 'var(--brand)', display: 'inline-block', animation: 'spin .7s linear infinite' }} /> Reading price…</>
+                : <>📷 Scan price tag</>}
+            </button>
+            {scan && scan.type !== 'load' && (
+              <div className="err-text" style={{ color: scan.type === 'ok' ? 'var(--success-text)' : 'var(--danger-text)', fontWeight: 600 }}>
+                {scan.type === 'ok' ? '✓ ' : '⚠ '}{scan.text}
+              </div>
+            )}
           </div>
 
           <div style={{ background: live ? 'var(--success-bg)' : 'var(--surface-3)', border: '1px solid', borderColor: live ? 'var(--success-border)' : 'var(--border)', borderRadius: 'var(--r-md)', padding: '12px 15px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', transition: 'background .2s' }}>
